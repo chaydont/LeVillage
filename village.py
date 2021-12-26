@@ -1,3 +1,4 @@
+import os
 import re
 import discord
 from typing import Union
@@ -44,8 +45,7 @@ async def setup_maisons(ctx):
             "role": role,
             "maison": maison
         }
-
-        save(ctx)
+    await save(ctx)
 
 @client.command(brief="Inviter quelqu'un dans sa maison",
     help="""Invite un joueur dans sa maison.
@@ -170,4 +170,4 @@ async def on_ready():
 #     except Exception as e:
 #         await message.channel.send("Error: " + str(e))
 
-client.run("OTIyNTE0MjM1MzIwMzM2NDI2.YcCkVQ.RECmGi5VG81ZoaaYFWR6D_1Ytnw")
+client.run(os.environ['TOKEN'])
