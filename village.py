@@ -4,6 +4,7 @@ import discord
 from typing import Union
 from discord.ext import commands
 from discord import Colour, Member, Role, PermissionOverwrite
+from keep_alive import keep_alive
 
 intents = discord.Intents.default()
 intents.members = True
@@ -19,7 +20,7 @@ async def ding(ctx):
 
 @client.command(hidden=True)
 async def print_players(ctx):
-    players = await get_member_from_role(ctx.guild, "Player")
+    players = get_member_from_role(ctx.guild, "Player")
     await ctx.send(str(len(players)) + " Players: ")
     for player in players:
         await ctx.send("<@!" + str(player.id) + ">")
@@ -32,18 +33,25 @@ async def setup_maisons(ctx):
     role_player = get_role(ctx, "Player")
     await ctx.send("Je construis des maisons pour: ")
     for player in get_member_from_role(ctx.guild, "Player"):
-        maison = await ctx.guild.create_text_channel("Maison de " + player.name, category=category)
-
-        await maison.set_permissions(player, read_messages=True, send_messages=True)
-        await maison.set_permissions(role_player, read_messages=False)
-        await ctx.send(player.name)
 
         role = await ctx.guild.create_role(name=player.name, color=Colour.lighter_grey(), mentionable=True)
         await player.add_roles(role)
 
+        maison = await ctx.guild.create_text_channel("Maison de " + player.name, category=category)
+        await maison.set_permissions(role, read_messages=True, send_messages=True)
+        await maison.set_permissions(role_player, read_messages=False)
+
+        vaison = await ctx.guild.create_voice_channel("Maison de " + player.name, category=category)
+        await vaison.set_permissions(role, view_channel=True)
+        await vaison.set_permissions(role_player, view_channel=False)
+
+        await ctx.send(player.name)
+
         players[player.id] = {
+            "member": player,
             "role": role,
-            "maison": maison
+            "maison": maison,
+            "vaison": vaison
         }
     await save(ctx)
 
@@ -52,36 +60,50 @@ async def setup_maisons(ctx):
     Ne peut pas être utilisé ailleurs que chez soi.
     !kick pour faire partir le joueur""")
 async def invite(ctx, player: Union[Member, Role]):
-    if type(player) == Member:
-        player = players[player.id]["role"]
-    if ctx.channel == players[ctx.author.id]["maison"]:
+    if await check_authorization(ctx):
+        if type(player) == Member:
+            player = players[player.id]["role"]
+        await players[ctx.author.id]["maison"].set_permissions(player, read_messages=True, send_messages=True, read_message_history=False)
+        await players[ctx.author.id]["vaison"].set_permissions(player, view_channel=True)
         await ctx.send("J'invite " + player.name + " ici :)")
-        await ctx.channel.set_permissions(player, read_messages=True, send_messages=True, read_message_history=False)
-    else:
-        await ctx.send("Vous n'avez pas le droit de faire ça ici")
 
 @client.command(brief="Faire sortir quelqu'un de sa maison",
     help="""Kick un joueur dans sa maison.
     Ne peut pas être utilisé ailleurs que chez soi.""")
 async def kick(ctx, player: Union[Member, Role]):
-    if type(player) == Member:
-        player = players[player.id]["role"]
-    if ctx.channel == players[ctx.author.id]["maison"]:
-        await ctx.channel.set_permissions(player, read_messages=False)
+    if await check_authorization(ctx):
+        if type(player) == Member:
+            player = players[player.id]["role"]
+        await players[ctx.author.id]["maison"].set_permissions(player, read_messages=False)
+        await players[ctx.author.id]["vaison"].set_permissions(player, view_channel=False)
         await ctx.send("Dehors " + player.name + " !")
-    else:
-        await ctx.send("Vous n'avez pas le droit de faire ça ici")
+
+
+@client.command(brief="Renommer sa maison",
+    help="""Renomme sa maison.
+    Il faut mettre le nom entre guillemets s'il y a des espaces.
+    Ne peut pas être utilisé en dehors de sa propre maison.
+    Attention, ne peut pas être utilisé plus de 2 fois en 10 minutes.
+    """)
+async def renommer(ctx, nouveau_nom):
+    if await check_authorization(ctx):
+        player_data = get_player_from_maison(ctx.channel)
+        await player_data["maison"].edit(name=nouveau_nom)
+        await player_data["vaison"].edit(name=nouveau_nom)
+        await ctx.send("Maison renommée en : " + nouveau_nom)
+
+########### CLEAR ##############
 
 
 @client.command(hidden=True)
 async def clear_setup(ctx):
     for player in players.values():
         await player["maison"].delete()
+        await player["vaison"].delete()
         await player["role"].delete()
 
 @client.command(hidden=True)
 async def full_clear(ctx):
-    players = {}
     for channel in ctx.guild.channels:
         if channel != ctx.channel:
             await channel.delete()
@@ -90,18 +112,10 @@ async def full_clear(ctx):
         if len(role.members) <= 1 and role.name != "Le Village":
             await ctx.send(role.name)
             await role.delete()
+    global players
+    players = {}
 
-@client.command(brief="Renommer sa maison",
-    help="""Renomme sa maison.
-    Il ne peut pas y avoir d'espace dans le nom, les remplacer par des tirets
-    Ne peut pas être utilisé en dehors de sa propre maison.
-    """)
-async def renommer(ctx, nouveau_nom):
-    if ctx.channel == players.get(ctx.author.id, None)["maison"]:
-        await ctx.channel.edit(name=nouveau_nom)
-        await ctx.send("Maison renommée en : " + nouveau_nom)
-    else:
-        await ctx.send("Vous n'avez pas le droit de faire ça ici")
+###### LOAD/SAVE ###########
 
 @client.command(hidden=True)
 async def save(ctx):
@@ -113,20 +127,25 @@ async def save(ctx):
     channel = await ctx.guild.create_text_channel("memory", topic="Ne pas modifier ce channel", overwrites=overwrites)
     await channel.send("**Maisons**")
     for player in players:
-        await channel.send("<@" + str(player) + "> - <@&" + str(players[player]["role"].id) + "> - <#" + str(players[player]["maison"].id) + ">")
+        await channel.send("<@" + str(player) + "> - "
+                         + "<@&" + str(players[player]["role"].id) + "> - "
+                         + "<#" + str(players[player]["maison"].id) + "> - "
+                         + "<#" + str(players[player]["vaison"].id) + ">")
 
 @client.command(hidden=True)
 async def load(ctx):
     global players
-    pattern = re.compile("^<@([0-9]+)> - <@&([0-9]+)> - <#([0-9]+)>$")
+    pattern = re.compile("^<@([0-9]+)> - <@&([0-9]+)> - <#([0-9]+)> - <#([0-9]+)>$")
     players = {}
     channel = discord.utils.get(ctx.guild.channels, name="memory")
     async for elem in channel.history():
         match = pattern.match(elem.content)
         if match:
             players[int(match.group(1))] = {
+                "member": discord.utils.get(ctx.guild.members, id=int(match.group(1))),
+                "role": ctx.guild.get_role(int(match.group(2))),
                 "maison": ctx.guild.get_channel(int(match.group(3))),
-                "role": ctx.guild.get_role(int(match.group(2)))
+                "vaison": ctx.guild.get_channel(int(match.group(4)))
             }
 
 ######## UTILITY #########
@@ -144,12 +163,34 @@ def get_role(ctx, role_name):
         if role.name == role_name:
             return role
 
+async def check_authorization(ctx):
+    if not players:
+        await load(ctx)
+    if ctx.channel != players[ctx.author.id]["maison"]:
+        await ctx.send("Vous n'avez pas le droit de faire ça ici")
+        return False
+    return True
+
+def get_player_from_maison(maison):
+    for player in players:
+        if players[player]["maison"] == maison:
+            return players[player]
+
+def get_player_from_role(role):
+    for player in players:
+        if players[player]["role"] == role:
+            return players[player]
+
 ######### ERRORS #########
 
+class ErrorHandler(commands.Cog):
 
-# @commands.Cog.listener
-# async def on_command_error(ctx, error):
-#     await ctx.send("ERROR: " + str(error))
+    @commands.Cog.listener()
+    async def on_command_error(self, ctx: commands.Context, error: commands.CommandError):
+        await ctx.send(str(error))
+        raise error
+
+client.add_cog(ErrorHandler())
 
 
 ######### EVENTS #########
@@ -160,14 +201,5 @@ async def on_ready():
         print("ready " + guild.name)
 
 
-
-# # @client.event
-# async def on_message(message):
-#     try:
-#         for command in commands:
-#             if message.content.startswith(command):
-#                 await commands[command](message.channel, message.content[len(command) + 1:])
-#     except Exception as e:
-#         await message.channel.send("Error: " + str(e))
-
+keep_alive()
 client.run(os.environ['TOKEN'])
